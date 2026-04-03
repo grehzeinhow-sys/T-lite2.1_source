@@ -13,11 +13,16 @@
 #include <utmpx.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #define BUFFER_SIZE 4096
 #define SLEEP_USEC  100000
 #define MAX_CPUS    512
 #define MAX_SECTIONS 20
+
+// Global file pointer for output (stdout by default)
+FILE *output_file = NULL;
+int save_to_file = 0;
 
 typedef struct {
     char name[16];
@@ -43,15 +48,34 @@ void print_logged_in_users(void);
 void print_ssh_users(void);
 void print_top_processes(void);
 void print_sections_in_order(void);
+void print_output(const char *format, ...);
 
-// Optimized command execution
+// Custom print function that writes to both stdout and file if needed
+void print_output(const char *format, ...) {
+    va_list args1, args2;
+    va_start(args1, format);
+    va_copy(args2, args1);
+
+    // Print to stdout
+    vprintf(format, args1);
+
+    // Print to file if specified
+    if (save_to_file && output_file) {
+        vfprintf(output_file, format, args2);
+    }
+
+    va_end(args1);
+    va_end(args2);
+}
+
+// Optimized command execution with output redirection
 void exec_command_optimized(const char *cmd) {
     FILE *fp = popen(cmd, "r");
     if (!fp) return;
 
     char buf[256];
     while (fgets(buf, sizeof(buf), fp)) {
-        fputs(buf, stdout);
+        print_output("%s", buf);
     }
     pclose(fp);
 }
@@ -60,7 +84,7 @@ void exec_command_optimized(const char *cmd) {
 void print_cpu_info(void) {
     if (!show_all && !should_display("cpu")) return;
 
-    printf("\n========== CPU ==========\n");
+    print_output("\n========== CPU ==========\n");
 
     char buf[512];
     int num_cpus = 0;
@@ -84,14 +108,14 @@ void print_cpu_info(void) {
             }
         }
         fclose(fp);
-        printf("Model: %s\n", model);
-        printf("Total cores: %d\n", num_cpus);
+        print_output("Model: %s\n", model);
+        print_output("Total cores: %d\n", num_cpus);
     }
 
     // Load average
     double loadavg[3];
     if (getloadavg(loadavg, 3) == 3) {
-        printf("Load average: %.2f, %.2f, %.2f\n", loadavg[0], loadavg[1], loadavg[2]);
+        print_output("Load average: %.2f, %.2f, %.2f\n", loadavg[0], loadavg[1], loadavg[2]);
     }
 
     // Per-core CPU usage with single file read
@@ -130,7 +154,7 @@ void print_cpu_info(void) {
                 }
                 fclose(fp);
 
-                printf("\nPer-core usage:\n");
+                print_output("\nPer-core usage:\n");
                 double total_usage = 0;
                 int active = 0;
 
@@ -145,19 +169,19 @@ void print_cpu_info(void) {
 
                     if (delta_total > 0) {
                         double usage = 100.0 * (delta_total - delta_idle) / delta_total;
-                        printf("  Core %2d: %5.1f%% [", i, usage);
+                        print_output("  Core %2d: %5.1f%% [", i, usage);
                         int bars = (int)(usage / 2);
                         for (int j = 0; j < 50; j++) {
-                            putchar(j < bars ? '#' : (j == bars ? '>' : ' '));
+                            print_output("%c", j < bars ? '#' : (j == bars ? '>' : ' '));
                         }
-                        printf("]\n");
+                        print_output("]\n");
                         total_usage += usage;
                         active++;
                     }
                 }
 
                 if (active > 0) {
-                    printf("\nAverage: %.2f%%\n", total_usage / active);
+                    print_output("\nAverage: %.2f%%\n", total_usage / active);
                 }
             }
         }
@@ -168,7 +192,7 @@ void print_cpu_info(void) {
 void print_memory_info(void) {
     if (!show_all && !should_display("memory")) return;
 
-    printf("\n========== MEMORY ==========\n");
+    print_output("\n========== MEMORY ==========\n");
 
     char buf[256];
     unsigned long long mem_total = 0, mem_free = 0, mem_avail = 0, swap_total = 0, swap_free = 0, cached = 0;
@@ -194,12 +218,12 @@ void print_memory_info(void) {
     }
 
     if (mem_total > 0) {
-        printf("RAM Total: %.2f GB, Free: %.2f GB, Avail: %.2f GB\n",
-               mem_total / 1048576.0, mem_free / 1048576.0, mem_avail / 1048576.0);
-        printf("Cached: %.2f GB\n", cached / 1048576.0);
+        print_output("RAM Total: %.2f GB, Free: %.2f GB, Avail: %.2f GB\n",
+                     mem_total / 1048576.0, mem_free / 1048576.0, mem_avail / 1048576.0);
+        print_output("Cached: %.2f GB\n", cached / 1048576.0);
         if (swap_total > 0) {
-            printf("Swap Total: %.2f GB, Free: %.2f GB\n",
-                   swap_total / 1048576.0, swap_free / 1048576.0);
+            print_output("Swap Total: %.2f GB, Free: %.2f GB\n",
+                         swap_total / 1048576.0, swap_free / 1048576.0);
         }
     }
 }
@@ -208,12 +232,12 @@ void print_memory_info(void) {
 void print_disk_info(void) {
     if (!show_all && !should_display("disk")) return;
 
-    printf("\n========== DISKS ==========\n");
+    print_output("\n========== DISKS ==========\n");
 
     FILE *mtab = setmntent("/proc/mounts", "r");
     if (mtab) {
         struct mntent *mnt;
-        printf("%-20s %-20s %8s %8s %8s\n", "Filesystem", "Mount point", "Size", "Used", "Avail");
+        print_output("%-20s %-20s %8s %8s %8s\n", "Filesystem", "Mount point", "Size", "Used", "Avail");
 
         while ((mnt = getmntent(mtab))) {
             // Skip pseudo FS quickly
@@ -241,7 +265,7 @@ void print_disk_info(void) {
                     snprintf(avail_str, sizeof(avail_str), "%.0fM", free / 1048576.0);
                 }
 
-                printf("%-20s %-20s %8s %8s %8s\n", mnt->mnt_fsname, mnt->mnt_dir, size_str, used_str, avail_str);
+                print_output("%-20s %-20s %8s %8s %8s\n", mnt->mnt_fsname, mnt->mnt_dir, size_str, used_str, avail_str);
             }
         }
         endmntent(mtab);
@@ -252,7 +276,7 @@ void print_disk_info(void) {
 void print_network_info(void) {
     if (!show_all && !should_display("network")) return;
 
-    printf("\n========== NETWORK ==========\n");
+    print_output("\n========== NETWORK ==========\n");
 
     char buf[512];
     FILE *fp = fopen("/proc/net/dev", "r");
@@ -260,7 +284,7 @@ void print_network_info(void) {
         fgets(buf, sizeof(buf), fp); // Skip header
         fgets(buf, sizeof(buf), fp); // Skip header
 
-        printf("%-12s %12s %12s %12s %12s\n", "Interface", "RX bytes", "RX errs", "TX bytes", "TX errs");
+        print_output("%-12s %12s %12s %12s %12s\n", "Interface", "RX bytes", "RX errs", "TX bytes", "TX errs");
 
         while (fgets(buf, sizeof(buf), fp)) {
             char iface[32] = {0};
@@ -286,7 +310,7 @@ void print_network_info(void) {
                         sscanf(colon + 1, "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                                &rx_bytes, &dummy, &rx_errs, &dummy, &dummy, &dummy, &dummy, &dummy,
                                &tx_bytes, &dummy, &tx_errs);
-                        printf("%-12s %12llu %12llu %12llu %12llu\n", iface, rx_bytes, rx_errs, tx_bytes, tx_errs);
+                        print_output("%-12s %12llu %12llu %12llu %12llu\n", iface, rx_bytes, rx_errs, tx_bytes, tx_errs);
                     }
                 }
             }
@@ -299,7 +323,7 @@ void print_network_info(void) {
 void print_gpu_info(void) {
     if (!show_all && !should_display("gpu")) return;
 
-    printf("\n========== GPU ==========\n");
+    print_output("\n========== GPU ==========\n");
 
     if (access("/usr/bin/nvidia-smi", X_OK) == 0) {
         exec_command_optimized("nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader 2>/dev/null");
@@ -312,13 +336,13 @@ void print_gpu_info(void) {
 void print_logged_in_users(void) {
     if (!show_all && !should_display("users")) return;
 
-    printf("\n========== LOGGED IN USERS ==========\n");
+    print_output("\n========== LOGGED IN USERS ==========\n");
 
     setutxent();
     struct utmpx *u;
     int found = 0;
 
-    printf("%-12s %-8s %-16s %s\n", "USER", "TERMINAL", "LOGIN TIME", "FROM");
+    print_output("%-12s %-8s %-16s %s\n", "USER", "TERMINAL", "LOGIN TIME", "FROM");
 
     while ((u = getutxent())) {
         if (u->ut_type == USER_PROCESS) {
@@ -328,19 +352,19 @@ void print_logged_in_users(void) {
             struct tm *tm_info = localtime(&login_time);
             strftime(time_str, sizeof(time_str), "%m-%d %H:%M", tm_info);
 
-            printf("%-12s %-8s %-16s %s\n", u->ut_user, u->ut_line, time_str, u->ut_host);
+            print_output("%-12s %-8s %-16s %s\n", u->ut_user, u->ut_line, time_str, u->ut_host);
         }
     }
     endutxent();
 
-    if (!found) printf("No users logged in\n");
+    if (!found) print_output("No users logged in\n");
 }
 
 // SSH users
 void print_ssh_users(void) {
     if (!show_all && !should_display("ssh")) return;
 
-    printf("\n========== SSH CONNECTIONS ==========\n");
+    print_output("\n========== SSH CONNECTIONS ==========\n");
     exec_command_optimized("ss -tn state established '( dport = :22 or sport = :22 )' 2>/dev/null | tail -n +2 | awk '{print $4\" -> \"$5}'");
 }
 
@@ -348,10 +372,10 @@ void print_ssh_users(void) {
 void print_top_processes(void) {
     if (!show_all && !should_display("processes")) return;
 
-    printf("\n========== TOP PROCESSES ==========\n");
-    printf("CPU:\n");
+    print_output("\n========== TOP PROCESSES ==========\n");
+    print_output("CPU:\n");
     exec_command_optimized("ps axo pid,comm,%cpu --sort=-%cpu 2>/dev/null | head -6");
-    printf("\nMEM:\n");
+    print_output("\nMEM:\n");
     exec_command_optimized("ps axo pid,comm,%mem --sort=-%mem 2>/dev/null | head -6");
 }
 
@@ -359,16 +383,16 @@ void print_top_processes(void) {
 void print_system_info(void) {
     if (!show_all && !should_display("system")) return;
 
-    printf("\n========== SYSTEM ==========\n");
+    print_output("\n========== SYSTEM ==========\n");
 
     struct utsname uts;
     if (uname(&uts) == 0) {
-        printf("%s %s %s\n", uts.sysname, uts.release, uts.machine);
+        print_output("%s %s %s\n", uts.sysname, uts.release, uts.machine);
     }
 
     char hostname[64];
     if (gethostname(hostname, sizeof(hostname)) == 0) {
-        printf("Host: %s\n", hostname);
+        print_output("Host: %s\n", hostname);
     }
 }
 
@@ -376,33 +400,33 @@ void print_system_info(void) {
 void print_time_info(void) {
     if (!show_all && !should_display("time")) return;
 
-    printf("\n========== TIME ==========\n");
+    print_output("\n========== TIME ==========\n");
 
     time_t now = time(NULL);
     struct tm *tm;
 
     tm = localtime(&now);
-    printf("Local: %04d-%02d-%02d %02d:%02d:%02d\n",
-           tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-           tm->tm_hour, tm->tm_min, tm->tm_sec);
+    print_output("Local: %04d-%02d-%02d %02d:%02d:%02d\n",
+                 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                 tm->tm_hour, tm->tm_min, tm->tm_sec);
 
     tm = gmtime(&now);
-    printf("UTC:   %04d-%02d-%02d %02d:%02d:%02d\n",
-           tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-           tm->tm_hour, tm->tm_min, tm->tm_sec);
+    print_output("UTC:   %04d-%02d-%02d %02d:%02d:%02d\n",
+                 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                 tm->tm_hour, tm->tm_min, tm->tm_sec);
 
     struct sysinfo info;
     if (sysinfo(&info) == 0) {
         int days = info.uptime / 86400;
         int hours = (info.uptime % 86400) / 3600;
         int mins = (info.uptime % 3600) / 60;
-        printf("Uptime: %dd %02dh %02dm\n", days, hours, mins);
+        print_output("Uptime: %dd %02dh %02dm\n", days, hours, mins);
 
         time_t boot = now - info.uptime;
         tm = localtime(&boot);
-        printf("Boot:   %04d-%02d-%02d %02d:%02d:%02d\n",
-               tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-               tm->tm_hour, tm->tm_min, tm->tm_sec);
+        print_output("Boot:   %04d-%02d-%02d %02d:%02d:%02d\n",
+                     tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                     tm->tm_hour, tm->tm_min, tm->tm_sec);
     }
 }
 
@@ -434,6 +458,20 @@ void parse_arguments(int argc, char *argv[]) {
     show_all = 0;
 
     for (int i = 1; i < argc; i++) {
+        // Check for -o option
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            save_to_file = 1;
+            output_file = fopen(argv[i + 1], "a"); // Append mode
+            if (!output_file) {
+                fprintf(stderr, "Error: Cannot open file %s for writing\n", argv[i + 1]);
+                exit(1);
+            }
+            // Write a blank line before new data
+            fprintf(output_file, "\n");
+            i++; // Skip the filename
+            continue;
+        }
+
         char *arg = argv[i];
         char *token = strtok(arg, ",");
         while (token) {
@@ -457,11 +495,14 @@ void parse_arguments(int argc, char *argv[]) {
 
 void print_help(void) {
     printf("BIG BROTHER - System Resource Monitor\n");
-    printf("Usage: ./bigbrother [sections...]\n");
+    printf("Usage: ./bigbrother [-o output_file] [sections...]\n");
+    printf("Options:\n");
+    printf("  -o <file>    Append output to specified file\n");
     printf("Sections: system, cpu, memory, disk, network, gpu, users, ssh, processes, time\n");
     printf("Examples:\n");
     printf("  ./bigbrother cpu memory time\n");
-    printf("  ./bigbrother disk network\n");
+    printf("  ./bigbrother -o /var/log/system.log disk network\n");
+    printf("  ./bigbrother -o monitor.log cpu,gpu,memory\n");
     printf("  ./bigbrother              # Show all\n");
 }
 
@@ -501,10 +542,18 @@ int main(int argc, char *argv[]) {
 
     parse_arguments(argc, argv);
 
-    printf("=== BIG BROTHER ===\n");
+    // Print to stdout and file (if specified)
+    print_output("=== BIG BROTHER ===\n");
 
     print_sections_in_order();
 
-    printf("\n=== DONE ===\n");
+    print_output("\n=== DONE ===\n");
+
+    // Close file if opened
+    if (save_to_file && output_file) {
+        fflush(output_file);
+        fclose(output_file);
+    }
+
     return 0;
 }
